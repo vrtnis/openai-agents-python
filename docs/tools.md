@@ -180,7 +180,7 @@ Sometimes, you don't want to use a Python function as a tool. You can directly c
 -   `name`
 -   `description`
 -   `params_json_schema`, which is the JSON schema for the arguments
--   `on_invoke_tool`, which is an async function that receives the context and the arguments as a JSON string, and must return the tool output as a string.
+-   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
 
 ```python
 from typing import Any
@@ -211,23 +211,6 @@ tool = FunctionTool(
     params_json_schema=FunctionArgs.model_json_schema(),
     on_invoke_tool=run_function,
 )
-```
-
-### Tool context
-
-When `on_invoke_tool` is called, it receives a `ToolContext` instance. The object contains:
-
-- `context` – the context object you passed to `Runner.run()`.
-- `usage` – usage information for the run so far.
-- `tool_name` – the name of the tool being invoked.
-- `tool_call_id` – the ID of the tool call.
-
-You can access these fields inside your tool function:
-
-```python
-async def run_function(ctx: ToolContext[Any], args: str) -> str:
-    print("Tool invoked:", ctx.tool_name)
-    ...
 ```
 
 ### Automatic argument and docstring parsing
