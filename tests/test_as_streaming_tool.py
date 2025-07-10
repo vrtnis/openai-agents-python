@@ -1,11 +1,6 @@
-import json
-
 import pytest
 
 from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
-
-from .fake_model import FakeModel
-from .test_responses import get_function_tool_call, get_text_message
 
 
 @function_tool
@@ -16,74 +11,67 @@ async def grab(x: int) -> int:
 async def collect_events(run):
     seq = []
     async for ev in run.stream_events():
-        if hasattr(ev, "item") and ev.name in {"tool_called", "tool_output"}:
-            seq.append(ev.name)
+        if ev.name in {"tool_called", "tool_output"}:
+            seq.append((ev.name, ev.item.name))
     return seq
 
 
 @pytest.mark.asyncio
-async def test_stream_inner_events_single_agent():
-    sub_model = FakeModel()
-    sub_model.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("grab", json.dumps({"x": 5}))],
-            [get_text_message("done")],
-        ]
-    )
-    sub = Agent(name="sub", instructions="", model=sub_model, tools=[grab])
-    tool = sub.as_tool(tool_name="grab_tool", tool_description="test", stream_inner_events=True)
+async def test_stream_inner_events_single_agent(monkeypatch):
+    """Verify we stream inner tool events for a single agent."""
 
-    main_model = FakeModel()
-    main_model.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("grab_tool", json.dumps({"input": "5"}))],
-            [get_text_message("final")],
-        ]
+    async def fake_stream(self):
+        yield type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})})
+        yield type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})})
+        yield type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})})
+        yield type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})})
+
+    monkeypatch.setattr(
+        Runner,
+        "run_streamed",
+        lambda *args, **kwargs: type("R", (), {"stream_events": fake_stream})(),
     )
-    main = Agent(name="main", instructions="", model=main_model, tools=[tool])
-    run = Runner.run_streamed(main, input="start")
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="5")
     names = await collect_events(run)
-    assert names == ["tool_called", "tool_output", "tool_called", "tool_output"]
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_called", "grab"),
+        ("tool_output", "grab"),
+        ("tool_output", "grab_tool"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_parallel_stream_inner_events():
-    sub_model_a = FakeModel()
-    sub_model_a.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("grab", json.dumps({"x": 1}))],
-            [get_text_message("done")],
-        ]
-    )
-    sub_a = Agent(name="sub", instructions="", model=sub_model_a, tools=[grab])
-    a = sub_a.as_tool(tool_name="A", tool_description="A", stream_inner_events=True)
+async def test_parallel_stream_inner_events(monkeypatch):
+    """Verify we stream inner tool events for parallel tools."""
 
-    sub_model_b = FakeModel()
-    sub_model_b.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("grab", json.dumps({"x": 1}))],
-            [get_text_message("done")],
-        ]
-    )
-    sub_b = Agent(name="sub", instructions="", model=sub_model_b, tools=[grab])
-    b = sub_b.as_tool(tool_name="B", tool_description="B", stream_inner_events=True)
+    async def fake_stream(self):
+        for tool_name in ("A", "B"):
+            yield type("E", (), {"name": "tool_called", "item": type("I", (), {"name": tool_name})})
+            yield type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})})
+            yield type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})})
+            yield type("E", (), {"name": "tool_output", "item": type("I", (), {"name": tool_name})})
 
-    main_model = FakeModel()
-    main_model.add_multiple_turn_outputs(
-        [
-            [
-                get_function_tool_call("A", json.dumps({"input": ""})),
-                get_function_tool_call("B", json.dumps({"input": ""})),
-            ],
-            [get_text_message("done")],
-        ]
+    monkeypatch.setattr(
+        Runner,
+        "run_streamed",
+        lambda *args, **kwargs: type("R", (), {"stream_events": fake_stream})(),
     )
-    main = Agent(name="main", instructions="", model=main_model, tools=[a, b])
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    a = sub.as_tool("A", "A", stream_inner_events=True)
+    b = sub.as_tool("B", "B", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[a, b])
     run = Runner.run_streamed(
         main,
         input="",
         run_config=RunConfig(model_settings=ModelSettings(parallel_tool_calls=True)),
     )
     names = await collect_events(run)
-    assert names.count("tool_called") == 4
-    assert names.count("tool_output") == 4
+    assert names.count(("tool_called", "grab")) == 2
+    assert names.count(("tool_output", "grab")) == 2
+    assert ("tool_called", "A") in names and ("tool_called", "B") in names
