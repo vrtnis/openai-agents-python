@@ -26,11 +26,16 @@ from openai.types.responses import (
 )
 
 from agents import (
+    Agent,
     ModelResponse,
     ModelSettings,
+    ModelSettings as AgentModelSettings,
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIProvider,
+    RunConfig,
+    Runner,
+    function_tool,
     generation_span,
 )
 from agents.models.chatcmpl_helpers import ChatCmplHelpers
@@ -381,3 +386,341 @@ def test_store_param():
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+@function_tool
+async def grab(x: int) -> int:
+    return x * 2
+
+
+async def collect_tool_events(run):
+    seq = []
+    async for ev in run.stream_events():
+        if hasattr(ev, "name"):
+            name = ev.name
+            item_name = getattr(getattr(ev, "item", None), "name", None)
+            seq.append((name, item_name))
+    return seq
+
+
+@pytest.mark.asyncio
+async def test_as_tool_streams_nested_tool_calls(monkeypatch):
+    """Verify nested tool events surface in order for a single wrapped tool."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="5")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_called", "grab"),
+        ("tool_output", "grab"),
+        ("tool_output", "grab_tool"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_tool_parallel_streams(monkeypatch):
+    """Verify nested events surface for multiple tools in parallel."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    seq = []
+    for t in ("A", "B"):
+        seq.extend(
+            [
+                type("E", (), {"name": "tool_called", "item": type("I", (), {"name": t})}),
+                type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})}),
+                type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})}),
+                type("E", (), {"name": "tool_output", "item": type("I", (), {"name": t})}),
+            ]
+        )
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in seq:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    a = sub.as_tool("A", "A", stream_inner_events=True)
+    b = sub.as_tool("B", "B", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[a, b])
+    run = Runner.run_streamed(
+        main,
+        input="",
+        run_config=RunConfig(model_settings=AgentModelSettings(parallel_tool_calls=True)),
+    )
+    names = await collect_tool_events(run)
+    assert names.count(("tool_called", "grab")) == 2
+    assert names.count(("tool_output", "grab")) == 2
+    assert ("tool_called", "A") in names and ("tool_called", "B") in names
+
+
+@pytest.mark.asyncio
+async def test_as_tool_error_propagation(monkeypatch):
+    """Errors from the inner agent surface via the outer tool output."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="boom")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_called", "grab"),
+        ("tool_output", "grab_tool"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_tool_empty_inner_run(monkeypatch):
+    """Even if the inner agent does nothing, outer events still emit."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_output", "grab_tool"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_tool_mixed_reasoning_and_tools(monkeypatch):
+    """Interleaved reasoning and tool events maintain relative order."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "reasoning_item_created", "item": type("I", (), {"name": "r1"})}),
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})}),
+        type("E", (), {"name": "reasoning_item_created", "item": type("I", (), {"name": "r2"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="mix")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("reasoning_item_created", "r1"),
+        ("tool_called", "grab"),
+        ("tool_output", "grab"),
+        ("reasoning_item_created", "r2"),
+        ("tool_output", "grab_tool"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_tool_multiple_inner_tools(monkeypatch):
+    """Inner agent calling two tools produces events for each."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab1"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab1"})}),
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab2"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab2"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="multi")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_called", "grab1"),
+        ("tool_output", "grab1"),
+        ("tool_called", "grab2"),
+        ("tool_output", "grab2"),
+        ("tool_output", "grab_tool"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_tool_heavy_concurrency_ordering(monkeypatch):
+    """Parallel runs with many tools preserve inner ordering."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    seq = []
+    for t in ("A", "B", "C"):
+        seq.extend(
+            [
+                type("E", (), {"name": "tool_called", "item": type("I", (), {"name": t})}),
+                type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab"})}),
+                type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab"})}),
+                type("E", (), {"name": "tool_output", "item": type("I", (), {"name": t})}),
+            ]
+        )
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in seq:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tools = [sub.as_tool(t, t, stream_inner_events=True) for t in ("A", "B", "C")]
+    main = Agent(name="main", instructions="", tools=tools)
+    run = Runner.run_streamed(
+        main,
+        input="",
+        run_config=RunConfig(model_settings=AgentModelSettings(parallel_tool_calls=True)),
+    )
+    names = await collect_tool_events(run)
+    assert names.count(("tool_called", "grab")) == 3
+    assert names.count(("tool_output", "grab")) == 3
+    for t in ("A", "B", "C"):
+        assert names.count(("tool_called", t)) == 1
+        assert names.count(("tool_output", t)) == 1
+
+
+@pytest.mark.asyncio
+async def test_as_tool_backward_compatibility(monkeypatch):
+    """With stream_inner_events=False inner events are suppressed."""
+
+    async def dummy_fetch_response(*args, **kwargs):
+        raise AssertionError("_fetch_response should not be called")
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", dummy_fetch_response)
+
+    events = [
+        type("E", (), {"name": "tool_called", "item": type("I", (), {"name": "grab_tool"})}),
+        type("E", (), {"name": "tool_output", "item": type("I", (), {"name": "grab_tool"})}),
+    ]
+
+    def fake_run_streamed(*args, **kwargs):
+        class R:
+            async def stream_events(self_inner):
+                for e in events:
+                    yield e
+
+        return R()
+
+    monkeypatch.setattr(Runner, "run_streamed", fake_run_streamed)
+
+    sub = Agent(name="sub", instructions="", tools=[grab])
+    tool = sub.as_tool("grab_tool", "test", stream_inner_events=False)
+    main = Agent(name="main", instructions="", tools=[tool])
+    run = Runner.run_streamed(main, input="off")
+    names = await collect_tool_events(run)
+    assert names == [
+        ("tool_called", "grab_tool"),
+        ("tool_output", "grab_tool"),
+    ]
