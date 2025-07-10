@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Generic
 
@@ -24,3 +25,5 @@ class RunContextWrapper(Generic[TContext]):
     """The usage of the agent run so far. For streamed responses, the usage will be stale until the
     last chunk of the stream is processed.
     """
+
+    _event_queue: asyncio.Queue[Any] | None = field(default=None, init=False, repr=False)

@@ -30,7 +30,6 @@ from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-
     from .agent import Agent
 
 ToolParams = ParamSpec("ToolParams")
@@ -92,6 +91,9 @@ class FunctionTool:
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
+
+    stream_inner_events: bool = False
+    """Whether to stream inner events when used as an agent tool."""
 
 
 @dataclass
