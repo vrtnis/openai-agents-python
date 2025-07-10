@@ -1,20 +1,12 @@
 import pytest
 
-from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
+from agents import Agent, Runner, function_tool, RunConfig, ModelSettings
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 
 
 @function_tool
 async def grab(x: int) -> int:
     return x * 2
-
-
-async def collect_events(run):
-    seq = []
-    async for ev in run.stream_events():
-        if ev.name in {"tool_called", "tool_output"}:
-            seq.append((ev.name, ev.item.name))
-    return seq
 
 
 async def collect_tool_events(run):
@@ -48,7 +40,7 @@ async def test_stream_inner_events_single_agent(monkeypatch):
     tool = sub.as_tool("grab_tool", "test", stream_inner_events=True)
     main = Agent(name="main", instructions="", tools=[tool])
     run = Runner.run_streamed(main, input="5")
-    names = await collect_events(run)
+    names = await collect_tool_events(run)
     assert names == [
         ("tool_called", "grab_tool"),
         ("tool_called", "grab"),
@@ -83,7 +75,7 @@ async def test_parallel_stream_inner_events(monkeypatch):
         input="",
         run_config=RunConfig(model_settings=ModelSettings(parallel_tool_calls=True)),
     )
-    names = await collect_events(run)
+    names = await collect_tool_events(run)
     assert names.count(("tool_called", "grab")) == 2
     assert names.count(("tool_output", "grab")) == 2
     assert ("tool_called", "A") in names and ("tool_called", "B") in names
