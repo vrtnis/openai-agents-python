@@ -250,7 +250,12 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             func_tool = function_map[event.name]
-            tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
+            tool_context = ToolContext(
+                context=self._context_wrapper.context,
+                usage=self._context_wrapper.usage,
+                tool_name=event.name,
+                tool_call_id=event.call_id,
+            )
             result = await func_tool.on_invoke_tool(tool_context, event.arguments)
 
             await self._model.send_tool_output(event, str(result), True)
