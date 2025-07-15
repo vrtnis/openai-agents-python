@@ -293,7 +293,12 @@ class RealtimeSession(RealtimeModelListener):
             )
         elif event.name in handoff_map:
             handoff = handoff_map[event.name]
-            tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
+            tool_context = ToolContext(
+                context=self._context_wrapper.context,
+                usage=self._context_wrapper.usage,
+                tool_name=event.name,
+                tool_call_id=event.call_id,
+            )
 
             # Execute the handoff to get the new agent
             result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
