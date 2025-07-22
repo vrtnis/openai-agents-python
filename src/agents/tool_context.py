@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field, fields
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -25,13 +25,21 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_call_id: str = field(default_factory=_assert_must_pass_tool_call_id)
     """The ID of the tool call."""
 
-    _event_queue: asyncio.Queue[Any] | None = field(default=None, init=False, repr=False)
+    _event_queue: Optional[asyncio.Queue[Any]] = field(default=None, init=False, repr=False)
+
+    @property
+    def event_queue(self) -> Optional[asyncio.Queue[Any]]:
+        return self._event_queue
+
+    @event_queue.setter
+    def event_queue(self, queue: Optional[asyncio.Queue[Any]]) -> None:
+        self._event_queue = queue
 
     @classmethod
     def from_agent_context(
         cls,
         context: RunContextWrapper[TContext],
-        tool_call_id: str | int,
+        tool_call_id: Union[str, int],
         tool_call: Optional[ResponseFunctionToolCall] = None,
     ) -> "ToolContext":
         """
