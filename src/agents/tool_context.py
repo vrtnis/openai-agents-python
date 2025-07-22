@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
@@ -24,11 +25,13 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_call_id: str = field(default_factory=_assert_must_pass_tool_call_id)
     """The ID of the tool call."""
 
+    _event_queue: asyncio.Queue[Any] | None = field(default=None, init=False, repr=False)
+
     @classmethod
     def from_agent_context(
         cls,
         context: RunContextWrapper[TContext],
-        tool_call_id: str,
+        tool_call_id: str | int,
         tool_call: Optional[ResponseFunctionToolCall] = None,
     ) -> "ToolContext":
         """
@@ -39,4 +42,7 @@ class ToolContext(RunContextWrapper[TContext]):
             f.name: getattr(context, f.name) for f in fields(RunContextWrapper) if f.init
         }
         tool_name = tool_call.name if tool_call is not None else _assert_must_pass_tool_name()
-        return cls(tool_name=tool_name, tool_call_id=tool_call_id, **base_values)
+        obj = cls(tool_name=tool_name, tool_call_id=str(tool_call_id), **base_values)
+        if hasattr(context, "event_queue"):
+            obj.event_queue = context.event_queue
+        return obj
