@@ -1135,6 +1135,7 @@ class AgentRunner:
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
         final_response: ModelResponse | None = None
+        injected_during_turn = False
 
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
         input.extend([item.to_input_item() for item in streamed_result.new_items])
@@ -1204,6 +1205,20 @@ class AgentRunner:
                 context_wrapper.usage.add(usage)
 
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+            # Break early if new items were injected during this turn.
+            if injected and len(injected) > 0:
+                injected_during_turn = True
+                break
+
+        if injected_during_turn and final_response is None:
+            return SingleStepResult(
+                original_input=streamed_result.input,
+                model_response=ModelResponse(output=[], usage=Usage(), response_id=None),
+                pre_step_items=streamed_result.new_items,
+                new_step_items=[],
+                next_step=NextStepRunAgain(),
+            )
 
         # --- NEW: if cancelled during streaming, terminate cleanly ---
         if (
