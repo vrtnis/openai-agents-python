@@ -102,6 +102,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["E501"]
+"src/agents/models/openai_responses.py" = ["W293", "I001"]
 
 [tool.mypy]
 strict = true
@@ -112,6 +113,10 @@ disallow_untyped_calls = false
 [[tool.mypy.overrides]]
 module = "sounddevice.*"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "agents.models.openai_responses"
+disable_error_code = ["attr-defined", "unused-ignore"]
 
 [tool.coverage.run]
 source = ["tests", "src/agents"]

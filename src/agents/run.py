@@ -404,6 +404,7 @@ class AgentRunner:
     WARNING: this class is experimental and not part of the public API
     It should not be used directly or subclassed.
     """
+
     @staticmethod
     def _safe_finish(obj, *, reset_current: bool = True) -> None:
         """
@@ -418,6 +419,7 @@ class AgentRunner:
             except Exception:
                 # Last-resort: swallow — we are in shutdown/cleanup paths.
                 pass
+
     async def run(
         self,
         starting_agent: Agent[TContext],
@@ -473,8 +475,8 @@ class AgentRunner:
                 context=context,  # type: ignore
             )
             # --- NEW: stash inbox + cancel token on context wrapper for internal access ---
-            context_wrapper._inbox = inbox
-            context_wrapper._cancel_token = cancel_token
+            cast(Any, context_wrapper)._inbox = inbox
+            cast(Any, context_wrapper)._cancel_token = cancel_token
 
             input_guardrail_results: list[InputGuardrailResult] = []
 
@@ -588,7 +590,7 @@ class AgentRunner:
 
                         # Save the conversation to session if enabled
                         await self._save_result_to_session(session, input, result)
-                        result.active_run = active_run  # expose handle on non-streamed
+                        cast(Any, result).active_run = active_run  # expose handle on non-streamed
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -616,7 +618,7 @@ class AgentRunner:
                     context_wrapper=context_wrapper,
                 )
                 # Save to session if enabled
-                result.active_run = active_run
+                cast(Any, result).active_run = active_run
                 await self._save_result_to_session(session, input, result)
                 return result
 
@@ -721,10 +723,9 @@ class AgentRunner:
 
         # A tiny state closure for debugging/inspection
         def _state_cb() -> dict[str, Any]:
+            current = getattr(streamed_result, "current_agent", None)
             return {
-                "current_agent": getattr(streamed_result, "current_agent", None).name
-                if getattr(streamed_result, "current_agent", None)
-                else None,
+                "current_agent": current.name if current else None,
                 "current_turn": streamed_result.current_turn,
                 "is_complete": streamed_result.is_complete,
                 "inbox_len": len(inbox),
@@ -733,9 +734,9 @@ class AgentRunner:
         active_run = _ActiveRun(cancel_token, inbox, _state_cb)
 
         # Stash these on the streamed_result; you'll expose helpers in result.py
-        streamed_result._active_run = active_run  # requires a small addition in result.py
-        streamed_result._cancel_token = cancel_token  # private
-        streamed_result._inbox = inbox  # private
+        cast(Any, streamed_result)._active_run = active_run
+        cast(Any, streamed_result)._cancel_token = cancel_token
+        cast(Any, streamed_result)._inbox = inbox
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
@@ -1094,10 +1095,11 @@ class AgentRunner:
                             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         raise
 
-                    _error_tracing.attach_error_to_span(
-                        current_span,
-                        SpanError(message="Error in agent run", data={"error": str(e)}),
-                    )
+                    if current_span:
+                        _error_tracing.attach_error_to_span(
+                            current_span,
+                            SpanError(message="Error in agent run", data={"error": str(e)}),
+                        )
                     if getattr(streamed_result, "_emit_status_events", False):
                         streamed_result._event_queue.put_nowait(
                             RunUpdatedStreamEvent(status="failed", reason=e.__class__.__name__)
@@ -1127,7 +1129,6 @@ class AgentRunner:
                 AgentRunner._safe_finish(current_span, reset_current=True)
             if streamed_result.trace and not trace_finished:
                 AgentRunner._safe_finish(streamed_result.trace, reset_current=True)
-
 
     @classmethod
     async def _run_single_turn_streamed(
@@ -1210,10 +1211,8 @@ class AgentRunner:
             prompt=prompt_config,
         ):
             # --- NEW: cooperative cancel during streaming ---
-            if (
-                getattr(streamed_result, "_cancel_token", None)
-                and streamed_result._cancel_token.is_cancelling()
-            ):
+            cancel_token = getattr(streamed_result, "_cancel_token", None)
+            if cancel_token and cancel_token.is_cancelling():
                 # Stop iterating; the model adapter should also close its stream cooperatively.
                 break
 
@@ -1254,21 +1253,15 @@ class AgentRunner:
             )
 
         # --- NEW: if cancelled during streaming, terminate cleanly ---
-        if (
-            getattr(streamed_result, "_cancel_token", None)
-            and streamed_result._cancel_token.is_cancelling()
-        ):
+        cancel_token = getattr(streamed_result, "_cancel_token", None)
+        if cancel_token and cancel_token.is_cancelling():
             if getattr(streamed_result, "_emit_status_events", False):
                 streamed_result._event_queue.put_nowait(
-                    RunUpdatedStreamEvent(
-                        status="cancelled", reason=streamed_result._cancel_token.reason
-                    )
+                    RunUpdatedStreamEvent(status="cancelled", reason=cancel_token.reason)
                 )
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-            raise asyncio.CancelledError(
-                getattr(streamed_result._cancel_token, "reason", None) or "Cancelled"
-            )
+            raise asyncio.CancelledError(cancel_token.reason or "Cancelled")
 
         # Call hook just after the model response is finalized.
         if agent.hooks and final_response is not None:
@@ -1568,7 +1561,7 @@ class AgentRunner:
                 filtered.input,  # Use filtered input
             )
 
-        async def _call_model():
+        async def _call_model() -> ModelResponse:
             return await model.get_response(
                 system_instructions=filtered.instructions,
                 input=filtered.input,

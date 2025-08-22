@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
-import contextlib
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -226,7 +226,9 @@ def get_model_tracing_impl(
     else:
         return ModelTracing.ENABLED_WITHOUT_DATA
 
+
 # --- NEW: helpers for cancellable tool execution ---
+
 
 async def _await_cancellable(awaitable):
     """Await an awaitable in its own task so CancelledError interrupts promptly."""
@@ -237,6 +239,7 @@ async def _await_cancellable(awaitable):
         # propagate so run.py can handle terminal cancel
         raise
 
+
 def _maybe_call_cancel_hook(tool_obj) -> None:
     """Best-effort: call a cancel/terminate hook on the tool if present."""
     for name in ("cancel", "terminate", "stop"):
@@ -245,6 +248,7 @@ def _maybe_call_cancel_hook(tool_obj) -> None:
             with contextlib.suppress(Exception):
                 cb()
             break
+
 
 class RunImpl:
     @classmethod
@@ -577,24 +581,31 @@ class RunImpl:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     # run start hooks first (don’t tie them to the cancellable task)
-                   await asyncio.gather(
-                       hooks.on_tool_start(tool_context, agent, func_tool),
-                       (agent.hooks.on_tool_start(tool_context, agent, func_tool) if agent.hooks else _coro.noop_coroutine()),
-                   )
-                   
-                   try:
-                       result = await _await_cancellable(
-                           func_tool.on_invoke_tool(tool_context, tool_call.arguments)
-                       )
-                   except asyncio.CancelledError:
-                       _maybe_call_cancel_hook(func_tool)
-                       raise
-                   
-                   await asyncio.gather(
-                       hooks.on_tool_end(tool_context, agent, func_tool, result),
-                       (agent.hooks.on_tool_end(tool_context, agent, func_tool, result) if agent.hooks else _coro.noop_coroutine()),
-                   )
-                   
+                    await asyncio.gather(
+                        hooks.on_tool_start(tool_context, agent, func_tool),
+                        (
+                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                            if agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                    )
+
+                    try:
+                        result = await _await_cancellable(
+                            func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+                        )
+                    except asyncio.CancelledError:
+                        _maybe_call_cancel_hook(func_tool)
+                        raise
+
+                    await asyncio.gather(
+                        hooks.on_tool_end(tool_context, agent, func_tool, result),
+                        (
+                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
+                            if agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                    )
 
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
@@ -665,45 +676,47 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> list[RunItem]:
-      results: list[RunItem] = []
-      for action in actions:
-          acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
-          if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
-              acknowledged = []
-              for check in action.tool_call.pending_safety_checks:
-                  data = ComputerToolSafetyCheckData(
-                      ctx_wrapper=context_wrapper,
-                      agent=agent,
-                      tool_call=action.tool_call,
-                      safety_check=check,
-                  )
-                  maybe = action.computer_tool.on_safety_check(data)
-                  ack = await maybe if inspect.isawaitable(maybe) else maybe
-                  if ack:
-                      acknowledged.append(ComputerCallOutputAcknowledgedSafetyCheck(
-                          id=check.id, code=check.code, message=check.message
-                      ))
-                  else:
-                      raise UserError("Computer tool safety check was not acknowledged")
-      
-          try:
-              item = await _await_cancellable(
-                  ComputerAction.execute(
-                      agent=agent,
-                      action=action,
-                      hooks=hooks,
-                      context_wrapper=context_wrapper,
-                      config=config,
-                      acknowledged_safety_checks=acknowledged,
-                  )
-              )
-          except asyncio.CancelledError:
-              _maybe_call_cancel_hook(action.computer_tool)
-              raise
-      
-          results.append(item)
-      
-      return results
+        results: list[RunItem] = []
+        for action in actions:
+            acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
+            if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
+                acknowledged = []
+                for check in action.tool_call.pending_safety_checks:
+                    data = ComputerToolSafetyCheckData(
+                        ctx_wrapper=context_wrapper,
+                        agent=agent,
+                        tool_call=action.tool_call,
+                        safety_check=check,
+                    )
+                    maybe = action.computer_tool.on_safety_check(data)
+                    ack = await maybe if inspect.isawaitable(maybe) else maybe
+                    if ack:
+                        acknowledged.append(
+                            ComputerCallOutputAcknowledgedSafetyCheck(
+                                id=check.id, code=check.code, message=check.message
+                            )
+                        )
+                    else:
+                        raise UserError("Computer tool safety check was not acknowledged")
+
+            try:
+                item = await _await_cancellable(
+                    ComputerAction.execute(
+                        agent=agent,
+                        action=action,
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        config=config,
+                        acknowledged_safety_checks=acknowledged,
+                    )
+                )
+            except asyncio.CancelledError:
+                _maybe_call_cancel_hook(action.computer_tool)
+                raise
+
+            results.append(item)
+
+        return results
 
     @classmethod
     async def execute_handoffs(
@@ -1090,7 +1103,7 @@ class ComputerAction:
         except asyncio.CancelledError:
             _maybe_call_cancel_hook(action.computer_tool)
             raise
-        
+
         # end hooks
         await asyncio.gather(
             hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),

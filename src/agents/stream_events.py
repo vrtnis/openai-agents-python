@@ -55,11 +55,14 @@ class AgentUpdatedStreamEvent:
     """The new agent."""
 
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
-    
+
     # --- NEW: terminal / status update event for the overall run ---
+
+
 @dataclass
 class RunUpdatedStreamEvent:
     """High-level run status update (emitted on completion, failure, or cancellation)."""
+
     status: Literal["running", "completed", "failed", "cancelled"] = "running"
     """Current run status."""
     reason: str | None = None
@@ -68,5 +71,10 @@ class RunUpdatedStreamEvent:
     """Event type identifier."""
 
 
-StreamEvent: TypeAlias = Union[RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent]
+StreamEvent: TypeAlias = Union[
+    RawResponsesStreamEvent,
+    RunItemStreamEvent,
+    AgentUpdatedStreamEvent,
+    RunUpdatedStreamEvent,
+]
 """A streaming event from an agent."""
